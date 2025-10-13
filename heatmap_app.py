@@ -1,7 +1,8 @@
 ############################################################
-# RNA-seq Heatmap Generator – Prekovic Lab (final)
-# Works directly with:
-#   counts_matrix_gene_with_symbols.txt
+# RNA-seq Heatmap Viewer – Prekovic Lab (final CSV version)
+# Works with:
+#   log2_norm.csv
+#   vst_norm.csv
 #   annotations_samples.xlsx
 ############################################################
 
@@ -12,153 +13,114 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import io
 
-st.set_page_config(page_title="RNA-seq Heatmap Generator", layout="wide")
+st.set_page_config(page_title="RNA-seq Heatmap Viewer", layout="wide")
 
-st.title("🧬 RNA-seq Heatmap Generator – Prekovic Lab")
+st.title("🧬 RNA-seq Heatmap Viewer – Prekovic Lab")
 st.markdown("""
-Upload  
-• **Expression matrix:** `counts_matrix_gene_with_symbols.txt`  
-• **Annotation file:** `annotations_samples.xlsx`  
-
-The app:
-- skips the featureCounts header line  
-- cleans and matches sample names automatically  
-- removes duplicated / zero-count genes  
-- normalizes by library size and applies log₂(count + 1) or z-score  
-- safely generates clustered or plain heatmaps  
-- allows palette / label / figure-size customization  
-- exports **PDF** and **PNG**
+Upload the normalized matrices you exported from R  
+(`log2_norm.csv` or `vst_norm.csv`) along with your `annotations_samples.xlsx`.  
+Then select genes and conditions to generate publication-ready clustered heatmaps.
 """)
 
 # ---------------------------------------------------------------------
 # Uploads
 # ---------------------------------------------------------------------
-expr_file = st.file_uploader("📂 Expression Matrix (.tsv / .txt)", type=["tsv","txt"])
-annot_file = st.file_uploader("📘 Annotation File (.xlsx)", type=["xlsx"])
+log2_file = st.file_uploader("📂 log2 normalized matrix (log2_norm.csv)", type=["csv"])
+vst_file  = st.file_uploader("📂 VST normalized matrix (vst_norm.csv)", type=["csv"])
+annot_file = st.file_uploader("📘 Annotation file (annotations_samples.xlsx)", type=["xlsx"])
 
-if expr_file and annot_file:
+if (log2_file or vst_file) and annot_file:
     try:
-        # =============================================================
-        # 1️⃣  LOAD & CLEAN EXPRESSION MATRIX
-        # =============================================================
-        expr = pd.read_csv(expr_file, sep="\t", comment="#",
-                           low_memory=False, encoding="utf-8-sig")
-        expr.columns = [c.strip() for c in expr.columns]
-        lower = [c.lower() for c in expr.columns]
-
-        # detect Gene_Symbol / Geneid
-        if "gene_symbol" in lower:
-            sym_col = expr.columns[lower.index("gene_symbol")]
-            id_col  = expr.columns[lower.index("geneid")] if "geneid" in lower else sym_col
-            expr.index = expr[sym_col].fillna(expr[id_col])
-        elif "geneid" in lower:
-            id_col = expr.columns[lower.index("geneid")]
-            expr.index = expr[id_col]
+        # --------------------------------------------------------------
+        # 1️⃣ Load expression data
+        # --------------------------------------------------------------
+        if vst_file:
+            expr = pd.read_csv(vst_file, index_col=0)
+            norm_label = "VST normalization"
         else:
-            st.error(f"❌ Could not find Gene_Symbol / Geneid.\nColumns = {expr.columns.tolist()}")
-            st.stop()
+            expr = pd.read_csv(log2_file, index_col=0)
+            norm_label = "log₂(count + 1) normalization"
 
-        # drop metadata cols
-        meta = ["geneid","gene_symbol","chr","start","end","strand","length"]
-        expr.drop(columns=[c for c in expr.columns if c.lower() in meta], inplace=True, errors="ignore")
-
-        # clean gene names
+        # Clean gene names
         expr.index = (expr.index.astype(str)
-                                .str.strip()
-                                .str.upper()
-                                .str.replace(r"\.\d+$","",regex=True))
-        expr = expr[~expr.index.duplicated(keep="first")]
-        expr = expr.loc[expr.sum(axis=1) > 0]
+                      .str.strip()
+                      .str.upper()
+                      .str.replace(r"\.\d+$","",regex=True))
 
-        # =============================================================
-        # 2️⃣  LOAD ANNOTATION & MATCH SAMPLES
-        # =============================================================
+        # --------------------------------------------------------------
+        # 2️⃣ Load annotation
+        # --------------------------------------------------------------
         annot = pd.read_excel(annot_file)
         first_col = annot.columns[0]
         if first_col.startswith("Unnamed"):
             annot.rename(columns={first_col:"SampleName"}, inplace=True)
         if "SampleNames" in annot.columns:
             annot.rename(columns={"SampleNames":"SampleName"}, inplace=True)
-        if "SampleName" not in annot.columns:
-            st.error("❌ No sample-name column found in annotation file.")
-            st.stop()
-
         annot.index = annot["SampleName"].astype(str)
+
         if "group" not in annot.columns:
             st.error("❌ Annotation file must contain a 'group' column.")
             st.stop()
 
+        # Match samples
         expr = expr.loc[:, expr.columns.isin(annot.index)]
         annot = annot.loc[expr.columns, :]
 
-        # library-size normalization (size-factor)
-        lib_sizes = expr.sum(axis=0)
-        size_factors = lib_sizes / np.median(lib_sizes)
-        expr_norm = expr.div(size_factors, axis=1)
-
-        st.success(f"✅ Loaded {expr_norm.shape[0]:,} genes × {expr_norm.shape[1]} samples.")
+        st.success(f"✅ Loaded {expr.shape[0]:,} genes × {expr.shape[1]} samples ({norm_label}).")
         st.write("Groups detected:", ", ".join(sorted(annot['group'].unique())))
 
-        # =============================================================
-        # 3️⃣  SIDEBAR CONTROLS
-        # =============================================================
+        # --------------------------------------------------------------
+        # 3️⃣ Sidebar controls
+        # --------------------------------------------------------------
         st.sidebar.header("🎛️ Controls")
 
         groups = sorted(annot["group"].dropna().unique())
         selected_groups = st.sidebar.multiselect("Select conditions", groups, default=groups)
         samples = annot[annot["group"].isin(selected_groups)].index
-        mat = expr_norm[samples]
+        mat = expr[samples]
 
         genes_raw = st.sidebar.text_area("Enter genes (comma/newline separated):",
                                          placeholder="e.g. FOXP3, CTLA4, PDCD1")
         genes = [g.strip().upper() for g in genes_raw.replace("\n",",").split(",") if g.strip()]
 
-        norm_mode = st.sidebar.radio("Normalization:",
-                                     ["log₂(count + 1)","z-score (per gene)"], index=0)
         palette = st.sidebar.selectbox("Color palette:",
                                        ["magma","inferno","plasma","viridis","rocket","coolwarm"])
-        show_genes   = st.sidebar.checkbox("Show gene labels", True)
+        show_genes = st.sidebar.checkbox("Show gene labels", True)
         show_samples = st.sidebar.checkbox("Show sample labels", True)
         fig_w = st.sidebar.slider("Figure width",6,20,10)
         fig_h = st.sidebar.slider("Figure height",4,20,8)
 
-        # =============================================================
-        # 4️⃣  HEATMAP GENERATION (SAFE)
-        # =============================================================
+        # --------------------------------------------------------------
+        # 4️⃣ Generate heatmap safely
+        # --------------------------------------------------------------
         if len(genes) > 0:
             found = [g for g in genes if g in mat.index]
             missing = [g for g in genes if g not in mat.index]
 
             if not found:
-                st.error("No matching genes found in expression matrix.")
+                st.error("No matching genes found.")
                 st.stop()
             if missing:
                 st.warning(f"Missing genes: {', '.join(missing)}")
 
             data = mat.loc[found].apply(pd.to_numeric, errors="coerce").fillna(0)
 
-            if norm_mode.startswith("log"):
-                data_t = np.log2(data + 1)
-            else:
-                data_t = data.sub(data.mean(axis=1), axis=0).div(data.std(axis=1), axis=0)
+            # remove constant rows/cols
+            data = data.loc[data.var(axis=1) > 0, :]
+            data = data.loc[:, data.var(axis=0) > 0]
 
             cmap = sns.color_palette(palette, as_cmap=True)
-
-            # remove zero-variance rows/cols
-            data_t = data_t.loc[data_t.var(axis=1) > 0, :]
-            data_t = data_t.loc[:, data_t.var(axis=0) > 0]
-
             st.subheader("🔬 Clustered Heatmap")
 
-            if data_t.shape[0] < 2 or data_t.shape[1] < 2:
-                st.warning("⚠️ Not enough variable genes/samples for clustering – showing basic heatmap.")
+            if data.shape[0] < 2 or data.shape[1] < 2:
+                st.warning("⚠️ Not enough variable genes or samples for clustering — showing basic heatmap.")
                 fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-                sns.heatmap(data_t, cmap=cmap,
+                sns.heatmap(data, cmap=cmap,
                             xticklabels=show_samples, yticklabels=show_genes, ax=ax)
             else:
                 sns.set(font_scale=0.8)
                 fig = sns.clustermap(
-                    data_t, cmap=cmap,
+                    data, cmap=cmap,
                     col_cluster=True, row_cluster=True,
                     xticklabels=show_samples,
                     yticklabels=show_genes,
@@ -168,7 +130,7 @@ if expr_file and annot_file:
             st.pyplot(fig)
             plt.close()
 
-            # ----------------  DOWNLOADS  ----------------
+            # ---------------- Downloads ----------------
             buf_pdf = io.BytesIO()
             fig.savefig(buf_pdf, format="pdf", bbox_inches="tight")
             st.download_button("📄 Download vector PDF",
@@ -187,7 +149,7 @@ if expr_file and annot_file:
             st.info("👈 Enter one or more genes to generate a heatmap.")
 
     except Exception as e:
-        st.error(f"❌ {e}")
+        st.error(f"❌ Error: {e}")
 
 else:
-    st.warning("Upload both expression and annotation files to begin.")
+    st.warning("Upload at least one normalized matrix (.csv) and the annotation file to start.")
