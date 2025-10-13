@@ -1,84 +1,92 @@
-############################################################
-## Quick Heatmap Generator for RNA-seq expression data
-## Author: Prekovic Lab
-## Usage:
-##   source("custom_heatmap.R")
-############################################################
+import streamlit as st
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+import io
 
-suppressPackageStartupMessages({
-  library(DESeq2)
-  library(readxl)
-  library(pheatmap)
-  library(viridis)
-  library(matrixStats)
-})
+st.set_page_config(page_title="RNA-seq Heatmap Generator", layout="wide")
 
-## --- 1) File input ----------------------------------------------------------
-message("📂 Reading input files...")
+st.title("🧬 RNA-seq Heatmap Generator")
+st.markdown("""
+Upload an **expression matrix** (TSV or TXT, like `counts_matrix_gene_with_symbols.txt`)  
+and an **annotation file** (Excel, like `annotations_samples.xlsx`).  
+Then select genes and conditions to plot an interactive clustered heatmap.
+""")
 
-# ---- User file paths (adjust or use file.choose())
-expr_file <- file.choose()      # e.g. counts_matrix_gene_with_symbols.txt
-annot_file <- file.choose()     # e.g. annotations_samples.xlsx
+# --- Upload files ------------------------------------------------------------
+expr_file = st.file_uploader("Upload Expression Matrix (.tsv / .txt)", type=["txt", "tsv"])
+annot_file = st.file_uploader("Upload Annotation File (.xlsx)", type=["xlsx"])
 
-# ---- Read files
-count_data <- read.table(expr_file, header=TRUE, sep="\t", check.names=FALSE)
-rownames(count_data) <- count_data$Geneid
-counts <- count_data[, 8:ncol(count_data)]
+if expr_file and annot_file:
+    st.success("✅ Files uploaded successfully!")
 
-annotation <- as.data.frame(read_excel(annot_file))
-annotation$SampleName <- annotation$...1
-annotation <- annotation[,-1]
-rownames(annotation) <- annotation$SampleName
+    # --- Read expression file
+    expr = pd.read_csv(expr_file, sep="\t")
+    if "Geneid" in expr.columns:
+        expr.index = expr["Geneid"].astype(str)
+        expr = expr.drop(columns=["Geneid"])
+    if "Gene_Symbol" in expr.columns:
+        expr.index = expr["Gene_Symbol"].fillna(expr.index)
 
-# ---- Match order of samples
-counts <- counts[, colnames(counts) %in% annotation$SampleName, drop=FALSE]
-annotation <- annotation[colnames(counts), , drop=FALSE]
+    # --- Read annotation file
+    annot = pd.read_excel(annot_file)
+    if "...1" in annot.columns:
+        annot["SampleName"] = annot["...1"]
+        annot = annot.drop(columns=["...1"])
+    annot.index = annot["SampleName"].astype(str)
 
-# ---- Normalize (VST)
-sym <- ifelse(nchar(count_data$Gene_Symbol)>0, count_data$Gene_Symbol, count_data$Geneid)
-sym <- make.unique(sym)
-rownames(counts) <- sym[rownames(counts)]
-dds <- DESeqDataSetFromMatrix(as.matrix(counts), annotation, design=~1)
-vsd <- vst(dds, blind=TRUE)
-expr <- assay(vsd)
-coldata <- as.data.frame(colData(dds))
-rownames(coldata) <- annotation$SampleName
+    # --- Match columns and samples
+    expr = expr.loc[:, expr.columns.isin(annot.index)]
+    annot = annot.loc[expr.columns, :]
 
-## --- 2) User input for heatmap ---------------------------------------------
-cat("\n✅ Data loaded. Available groups:\n")
-print(unique(annotation$group))
-cat("\nEnter groups to include, separated by commas (e.g. VEH,TACT,TACT_BAF): ")
-grp_input <- scan(what="character", sep=",")
-grp_input <- trimws(grp_input)
-samples <- annotation$SampleName[annotation$group %in% grp_input]
+    # --- Sidebar: group and gene selection -----------------------------------
+    st.sidebar.header("🧩 Selection Panel")
+    available_groups = sorted(annot["group"].dropna().unique())
+    groups = st.sidebar.multiselect("Select Conditions", available_groups, default=available_groups)
+    samples = annot[annot["group"].isin(groups)].index
 
-cat("\nEnter genes of interest separated by commas (e.g. FOXP3,CTLA4,PDCD1): ")
-gene_input <- scan(what="character", sep=",")
-gene_input <- trimws(gene_input)
+    expr_sel = expr[samples]
 
-## --- 3) Prepare matrix ------------------------------------------------------
-pal <- viridis::magma(100)
-sel_genes <- intersect(gene_input, rownames(expr))
-if (length(sel_genes) == 0) stop("No matching gene symbols found.")
+    st.sidebar.markdown("### ✏️ Enter Genes of Interest")
+    gene_input = st.sidebar.text_area("Comma or newline separated gene symbols:")
+    genes = [g.strip() for g in gene_input.replace("\n", ",").split(",") if g.strip()]
 
-mat <- expr[sel_genes, samples, drop=FALSE]
-ann <- data.frame(group=annotation[samples, "group", drop=TRUE])
-rownames(ann) <- samples
+    if len(genes) > 0:
+        found = [g for g in genes if g in expr.index]
+        missing = [g for g in genes if g not in expr.index]
 
-## --- 4) Plot heatmap --------------------------------------------------------
-message("\n🎨 Generating heatmap...")
+        if len(found) == 0:
+            st.error("No matching genes found in expression data.")
+        else:
+            st.success(f"Found {len(found)} genes: {', '.join(found)}")
+            if missing:
+                st.warning(f"Missing genes: {', '.join(missing)}")
 
-pdf("custom_heatmap.pdf", width=8, height=6, useDingbats=FALSE)
-pheatmap(mat,
-         scale="row",
-         color=pal,
-         show_rownames=TRUE,
-         clustering_distance_rows="euclidean",
-         clustering_distance_cols="euclidean",
-         annotation_col=ann,
-         border_color=NA,
-         fontsize=9,
-         main=paste("Custom Heatmap –", paste(sel_genes, collapse=", ")))
-dev.off()
+            # Extract data and z-score normalize per gene
+            data = expr_sel.loc[found].apply(pd.to_numeric, errors="coerce").fillna(0)
+            data_z = (data - data.mean(axis=1).values.reshape(-1, 1)) / data.std(axis=1).values.reshape(-1, 1)
 
-message("\n✅ Heatmap saved as 'custom_heatmap.pdf' in current directory.")
+            # Plot heatmap
+            st.subheader("🎨 Clustered Heatmap")
+            cmap = sns.color_palette("magma", as_cmap=True)
+            sns.set(font_scale=0.7)
+
+            fig, ax = plt.subplots(figsize=(10, max(4, 0.4 * len(found))))
+            sns.clustermap(
+                data_z, cmap=cmap, col_cluster=True, row_cluster=True,
+                xticklabels=True, yticklabels=True, figsize=(10, 8)
+            )
+            st.pyplot(plt.gcf())
+            plt.close()
+
+            # Download PNG
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+            st.download_button("📥 Download Heatmap (PNG)", data=buf.getvalue(),
+                               file_name="heatmap.png", mime="image/png")
+    else:
+        st.info("👈 Enter at least one gene symbol to generate the heatmap.")
+
+else:
+    st.warning("Please upload both files above to start.")
