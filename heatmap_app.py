@@ -11,7 +11,7 @@ import io
 import re
 
 st.set_page_config(page_title="RNA-seq Heatmap Viewer", layout="wide")
-st.title("🧬 RNA-seq Heatmap Viewer (sanitized CSVs)")
+st.title("🧬 RNA-seq Heatmap Viewer")
 
 st.markdown("""
 Upload **one or both** normalized matrices exported from R (`vst_norm.csv`, `log2_norm.csv`)  
