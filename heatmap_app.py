@@ -1,6 +1,7 @@
 ############################################################
 # RNA-seq Heatmap Viewer — sanitized CSV workflow
 # Adds: scale mode (none/row/col/both) + clustering controls
+#       + average per condition option
 ############################################################
 import streamlit as st
 import pandas as pd
@@ -95,6 +96,18 @@ if (vst_file or log2_file) and annot_file:
         selected_groups = st.sidebar.multiselect("Select conditions (groups):", groups, default=groups)
         sel_samples = ann.index[ann["group"].isin(selected_groups)].tolist()
         mat = expr[sel_samples]
+
+        # --- NEW: option to average per condition ---
+        avg_mode = st.sidebar.checkbox("Plot average per condition", False)
+        if avg_mode:
+            grouped = []
+            for g in selected_groups:
+                group_samples = ann.index[ann["group"] == g]
+                if len(group_samples) == 0:
+                    continue
+                grouped.append(mat[group_samples].mean(axis=1).rename(g))
+            if grouped:
+                mat = pd.concat(grouped, axis=1)
 
         gene_text = st.sidebar.text_area("Enter genes (comma/newline separated):",
                                          placeholder="e.g. FOXP3, CTLA4, PDCD1")
